@@ -7,10 +7,19 @@ on:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
+    # Meme environnement que les builds d'origine (compatibilite libstdc++ des serveurs)
+    container: ubuntu:20.04
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions/checkout@v2
+    - name: Install deps
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        apt-get update
+        apt-get install -y git wget ca-certificates make g++-multilib
+        gcc --version
+    - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
       with:
         submodules: recursive
         repository: danielga/garrysmod_common
@@ -21,10 +30,7 @@ jobs:
         wget https://github.com/premake/premake-core/releases/download/v5.0.0-beta2/premake-5.0.0-beta2-linux.tar.gz -O premake.tar.gz
         tar -xvf premake.tar.gz
         chmod +x premake5
-        sudo cp premake5 /usr/bin
-        sudo apt-get update
-        sudo apt-get install g++-multilib
-        gcc --version
+        cp premake5 /usr/bin
     - name: Generate Project
       run: |
         premake5 --gmcommon=garrysmod_common gmake
@@ -42,10 +48,10 @@ jobs:
         name: gmsv_eightbit_linux64.dll
         path: projects/linux/gmake/x86_64/ReleaseWithSymbols/gmsv_eightbit_linux64.dll
   build-windows:
-    runs-on: windows-2019
+    runs-on: windows-2022
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
       with:
         submodules: recursive
         repository: danielga/garrysmod_common
@@ -57,21 +63,18 @@ jobs:
          tar -xf premake.zip
     - name: Generate Project
       run: |
-        ./premake5.exe --gmcommon=garrysmod_common vs2019
+        ./premake5.exe --gmcommon=garrysmod_common vs2022
+    - uses: microsoft/setup-msbuild@v2
     - name: Build
       run: |
-        cd projects/windows/vs2019
-        & "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\MSBuild\Current\Bin\msbuild.exe" /p:Configuration=ReleaseWithSymbols /p:Platform=Win32 eightbit.sln
+        cd projects/windows/vs2022
+        msbuild /p:Configuration=ReleaseWithSymbols /p:Platform=Win32 eightbit.sln
+        msbuild /p:Configuration=ReleaseWithSymbols /p:Platform=x64 eightbit.sln
     - uses: actions/upload-artifact@v4
       with:
-        name: gmsv_eightbit_windows.dll
-        path: projects/windows/vs2019/x86/ReleaseWithSymbols/gmsv_eightbit_win32.dll
-    - name: Build 64
-      run: |
-        cd projects/windows/vs2019
-        & "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\MSBuild\Current\Bin\msbuild.exe" /p:Configuration=ReleaseWithSymbols /p:Platform=x64 eightbit.sln
+        name: gmsv_eightbit_win32.dll
+        path: projects/windows/vs2022/x86/ReleaseWithSymbols/gmsv_eightbit_win32.dll
     - uses: actions/upload-artifact@v4
       with:
         name: gmsv_eightbit_win64.dll
-        path: projects/windows/vs2019/x86_64/ReleaseWithSymbols/gmsv_eightbit_win64.dll
-
+        path: projects/windows/vs2022/x86_64/ReleaseWithSymbols/gmsv_eightbit_win64.dll

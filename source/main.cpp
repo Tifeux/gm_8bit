@@ -61,7 +61,6 @@ void hook_BroadcastVoiceData(IClient* cl, uint nBytes, char* data, int64 xuid) {
 	}
 #endif
 
-	auto& afflicted_players = g_eightbit->afflictedPlayers;
 	if (g_eightbit->broadcastPackets && nBytes > sizeof(uint64_t)) {
 		//Get the user's steamid64, put it at the beginning of the buffer.
 		//Notice that we don't use the conveniently provided one in the voice packet. The client can manipulate that one.
@@ -83,8 +82,10 @@ void hook_BroadcastVoiceData(IClient* cl, uint nBytes, char* data, int64 xuid) {
  		net_handl->SendPacket(g_eightbit->ip.c_str(), g_eightbit->port, decompressedBuffer, nBytes);
 	}
 
-	if (afflicted_players.find(uid) != afflicted_players.end()) {
-		IVoiceCodec* codec = std::get<0>(afflicted_players.at(uid));
+	auto found = g_eightbit->players.find(uid);
+	if (found != g_eightbit->players.end() && found->second->effect != AudioEffects::EFF_NONE) {
+		PlayerVoice* pv = found->second;
+		IVoiceCodec* codec = pv->codec;
 
 		if(nBytes < STEAM_PCKT_SZ) {
 			return detour_BroadcastVoiceData.GetTrampoline<SV_BroadcastVoiceData>()(cl, nBytes, data, xuid);
@@ -102,8 +103,17 @@ void hook_BroadcastVoiceData(IClient* cl, uint nBytes, char* data, int64 xuid) {
 		#endif
 
 		//Apply audio effect
-		int eff = std::get<1>(afflicted_players.at(uid));
+		int eff = pv->effect;
 		switch (eff) {
+		case AudioEffects::EFF_VOICEFX: {
+			// Apres un silence, on repart d'un etat propre (pas de reste de l'ancienne phrase).
+			auto now = std::chrono::steady_clock::now();
+			if (now - pv->lastPacket > std::chrono::milliseconds(400))
+				pv->fx.Reset();
+			pv->lastPacket = now;
+			pv->fx.Process((int16_t*)decompressedBuffer, samples);
+			break;
+		}
 		case AudioEffects::EFF_BITCRUSH:
 			AudioEffects::BitCrush((uint16_t*)&decompressedBuffer, samples, g_eightbit->crushFactor, g_eightbit->gainFactor);
 			break;
@@ -168,27 +178,70 @@ LUA_FUNCTION_STATIC(eightbit_setdesamplerate) {
 	return 0;
 }
 
+static PlayerVoice* GetOrCreatePlayer(int id) {
+	auto it = g_eightbit->players.find(id);
+	if (it != g_eightbit->players.end())
+		return it->second;
+
+	PlayerVoice* pv = new PlayerVoice();
+	pv->codec = new SteamOpus::Opus_FrameDecoder();
+	pv->codec->Init(5, 24000);
+	g_eightbit->players[id] = pv;
+	return pv;
+}
+
 LUA_FUNCTION_STATIC(eightbit_enableEffect) {
-	int id = LUA->GetNumber(1);
-	int eff = LUA->GetNumber(2);
+	int id = (int)LUA->CheckNumber(1);
+	int eff = (int)LUA->CheckNumber(2);
 
-	auto& afflicted_players = g_eightbit->afflictedPlayers;
-	if (afflicted_players.find(id) != afflicted_players.end()) {
-		if (eff == AudioEffects::EFF_NONE) {
-			IVoiceCodec* codec = std::get<0>(afflicted_players.at(id));
-			delete codec;
-			afflicted_players.erase(id);
-		}
-		else {
-			std::get<1>(afflicted_players.at(id)) = eff;
-		}
+	auto it = g_eightbit->players.find(id);
+	if (it == g_eightbit->players.end() && eff == AudioEffects::EFF_NONE)
 		return 0;
-	}
-	else if(eff != AudioEffects::EFF_NONE) {
 
-		IVoiceCodec* codec = new SteamOpus::Opus_FrameDecoder();
-		codec->Init(5, 24000);
-		afflicted_players.insert(std::pair<int, std::tuple<IVoiceCodec*, int>>(id, std::tuple<IVoiceCodec*, int>(codec, eff)));
+	PlayerVoice* pv = GetOrCreatePlayer(id);
+	if (pv->effect != eff) {
+		// Changement d'effet : on vide les etats pour eviter les craquements.
+		pv->codec->ResetState();
+		pv->fx.Reset();
+	}
+	pv->effect = eff;
+	return 0;
+}
+
+// eightbit.SetVoiceParam(userid, "pitch", -4) -> true si la cle existe
+LUA_FUNCTION_STATIC(eightbit_setVoiceParam) {
+	int id = (int)LUA->CheckNumber(1);
+	std::string key = LUA->CheckString(2);
+	float value = (float)LUA->CheckNumber(3);
+
+	PlayerVoice* pv = GetOrCreatePlayer(id);
+	LUA->PushBool(VoiceFX::SetParam(pv->fx.params, key, value));
+	return 1;
+}
+
+// eightbit.SetVoiceParams(userid, { pitch = -4, formant = -3, ... })
+LUA_FUNCTION_STATIC(eightbit_setVoiceParams) {
+	int id = (int)LUA->CheckNumber(1);
+	LUA->CheckType(2, GarrysMod::Lua::Type::Table);
+
+	PlayerVoice* pv = GetOrCreatePlayer(id);
+	LUA->PushNil();
+	while (LUA->Next(2) != 0) {
+		// Ne pas convertir une cle non-string : ca casserait l'iteration.
+		if (LUA->IsType(-2, GarrysMod::Lua::Type::String) && LUA->IsType(-1, GarrysMod::Lua::Type::Number))
+			VoiceFX::SetParam(pv->fx.params, LUA->GetString(-2), (float)LUA->GetNumber(-1));
+		LUA->Pop();
+	}
+	return 0;
+}
+
+// eightbit.ClearPlayer(userid) : libere tout (a appeler a la deconnexion)
+LUA_FUNCTION_STATIC(eightbit_clearPlayer) {
+	int id = (int)LUA->CheckNumber(1);
+	auto it = g_eightbit->players.find(id);
+	if (it != g_eightbit->players.end()) {
+		delete it->second;
+		g_eightbit->players.erase(it);
 	}
 	return 0;
 }
@@ -264,6 +317,26 @@ GMOD_MODULE_OPEN()
 		LUA->PushString("EFF_BITCRUSH");
 		LUA->PushNumber(AudioEffects::EFF_BITCRUSH);
 		LUA->SetTable(-3);
+
+		LUA->PushString("EFF_VOICEFX");
+		LUA->PushNumber(AudioEffects::EFF_VOICEFX);
+		LUA->SetTable(-3);
+
+		LUA->PushString("SetVoiceParam");
+		LUA->PushCFunction(eightbit_setVoiceParam);
+		LUA->SetTable(-3);
+
+		LUA->PushString("SetVoiceParams");
+		LUA->PushCFunction(eightbit_setVoiceParams);
+		LUA->SetTable(-3);
+
+		LUA->PushString("ClearPlayer");
+		LUA->PushCFunction(eightbit_clearPlayer);
+		LUA->SetTable(-3);
+
+		LUA->PushString("VOICEFX_VERSION");
+		LUA->PushNumber(1);
+		LUA->SetTable(-3);
 	LUA->SetTable(-3);
 	LUA->Pop();
 
@@ -281,12 +354,9 @@ GMOD_MODULE_CLOSE()
 	detour_BroadcastVoiceData.Disable();
 	detour_BroadcastVoiceData.Destroy();
 
-	for (auto& p : g_eightbit->afflictedPlayers) {
-		IVoiceCodec* codec = std::get<0>(p.second);
-		if (codec != nullptr) {
-			delete codec;
-		}
-	}
+	for (auto& p : g_eightbit->players)
+		delete p.second;
+	g_eightbit->players.clear();
 
 	delete net_handl;
 	delete g_eightbit;

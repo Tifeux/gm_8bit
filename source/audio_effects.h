@@ -7,7 +7,8 @@ namespace AudioEffects {
 	enum {
 		EFF_NONE,
 		EFF_BITCRUSH,
-		EFF_DESAMPLE
+		EFF_DESAMPLE,
+		EFF_VOICEFX
 	};
 
 	void BitCrush(uint16_t* sampleBuffer, int samples, float quant, float gainFactor) {
